@@ -8,21 +8,28 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
+type Context struct {
+	context.Context
+	*errgroup.Group
+}
+
+func WithContext(ctx context.Context) *Context {
+	gr, ctx := errgroup.WithContext(ctx)
+	return &Context{ctx, gr}
+}
+
 // Source is a stage that a pipeline starts from.
-func Source(
-	ctx context.Context, gr *errgroup.Group,
-	count int,
-) <-chan int {
+func Source(x *Context, count int) <-chan int {
 	out := make(chan int)
 
 	// Example of a single-processing stage (single processor).
-	gr.Go(func() error { // processor
+	x.Go(func() error { // processor
 		defer close(out)
 
 		for n := 1; n <= count; n++ {
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-x.Done():
+				return x.Err()
 			// You must alway use non-blocking send because a downstream might
 			// never make a read from the channel and the goroutine will leak!
 			case out <- n:
@@ -36,19 +43,14 @@ func Source(
 
 // Mediator is a stage somewhere in the middle of a pipeline. That usually
 // grabs an input channel, processes it, and write the rusult to an output channel.
-func Mediator(
-	ctx context.Context, gr *errgroup.Group,
-	processors int, errorAfter int,
-	in <-chan int,
-) <-chan string {
+func Mediator(x *Context, processors int, errorAfter int, in <-chan int) <-chan string {
 	out := make(chan string)
 
-	// Example of a mutli-processing stage (many proccessors).
 	processor := func() error {
 		for in := range in {
 			select {
-			case <-ctx.Done():
-				return ctx.Err()
+			case <-x.Done():
+				return x.Err()
 			// You must alway use non-blocking send because a downstream might
 			// never make a read from the channel and the goroutine will leak!
 			case out <- strconv.Itoa(in):
@@ -61,19 +63,20 @@ func Mediator(
 		return nil
 	}
 
+	// Example of a mutli-processing stage (many proccessors).
 	// We need to wait for all the processors are done. After that
 	// the output channel must be closed.
 	// CRITICAL: the processors must be run in a separate errgroup!
-	gr.Go(func() error {
+	x.Go(func() error {
 		defer close(out)
-		return spawnProcessors(processors, processor)
+		return Parallel(processors, processor)
 	})
 	return out
 }
 
-// Spawn the specified number of processors in an rrgroup, wait until
-// all of them are done.
-func spawnProcessors(count int, processor func() error) error {
+// Run the specified number of processors in parallel,
+// wait until all of them are done.
+func Parallel(count int, processor func() error) error {
 	var gr errgroup.Group
 	for p := 0; p < count; p++ {
 		gr.Go(processor)
@@ -83,23 +86,23 @@ func spawnProcessors(count int, processor func() error) error {
 
 // Sink is a final stage in a pipeline. It usually collects the final result
 // of the pipeline. Commonly it does make no sense to run it asyncly.
-func Sink(ctx context.Context, gr *errgroup.Group, in <-chan string) (result []string, err error) {
+func Sink(x *Context, in <-chan string) (result []string, err error) {
 	for in := range in {
 		result = append(result, in)
 	}
-	return result, gr.Wait()
+	return result, x.Wait()
 }
 
 // Build and run a pipeline.
 func Run(ctx context.Context, count int, errorAfter int) ([]string, error) {
-	gr, ctx := errgroup.WithContext(ctx)
+	x := WithContext(ctx)
 
-	return Sink(ctx, gr,
-		Mediator(ctx, gr, 2, errorAfter,
-			Source(ctx, gr, count)))
+	return Sink(x,
+		Mediator(x, 2, errorAfter,
+			Source(x, count)))
 
 	// Or more explicitly:
-	// numbers := Source(ctx, gr, count)
-	// strings := Mediator(ctx, gr, 2, errorAfter, numbers)
-	// return Sink(ctx, gr, strings)
+	// numbers := Source(x, count)
+	// strings := Mediator(x, 2, errorAfter, numbers)
+	// return Sink(x, strings)
 }
