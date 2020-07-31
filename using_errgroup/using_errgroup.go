@@ -18,14 +18,21 @@ func WithContext(ctx context.Context) *Context {
 	return &Context{ctx, gr}
 }
 
+// Run the specified number of processors in parallel,
+// wait until all of them are done.
+func Parallel(count int, processor func() error) error {
+	var gr errgroup.Group
+	for p := 0; p < count; p++ {
+		gr.Go(processor)
+	}
+	return gr.Wait()
+}
+
 // Source is a stage that a pipeline starts from.
 func Source(x *Context, count int) <-chan int {
 	out := make(chan int)
 
-	// Example of a single-processing stage (single processor).
-	x.Go(func() error { // processor
-		defer close(out)
-
+	processor := func() error {
 		for n := 1; n <= count; n++ {
 			select {
 			case <-x.Done():
@@ -36,8 +43,13 @@ func Source(x *Context, count int) <-chan int {
 			}
 		}
 		return nil
-	})
+	}
 
+	// Example of a single-processing stage (single processor).
+	x.Go(func() error {
+		defer close(out)
+		return processor()
+	})
 	return out
 }
 
@@ -72,16 +84,6 @@ func Mediator(x *Context, processors int, errorAfter int, in <-chan int) <-chan 
 		return Parallel(processors, processor)
 	})
 	return out
-}
-
-// Run the specified number of processors in parallel,
-// wait until all of them are done.
-func Parallel(count int, processor func() error) error {
-	var gr errgroup.Group
-	for p := 0; p < count; p++ {
-		gr.Go(processor)
-	}
-	return gr.Wait()
 }
 
 // Sink is a final stage in a pipeline. It usually collects the final result
